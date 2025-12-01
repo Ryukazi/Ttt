@@ -1,34 +1,82 @@
 import express from "express";
 import axios from "axios";
+import FormData from "form-data";
+import fs from "fs-extra";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+const VIDEO_DIR = path.join(process.cwd(), "videos");
+await fs.ensureDir(VIDEO_DIR);
 
-app.get("/api/tiktok", async (req, res) => {
-  const tiktokUrl = req.query.url;
-  if (!tiktokUrl) return res.status(400).json({ error: "Missing 'url'" });
+app.get("/", (req, res) => {
+  res.send("Video Rehosting API Running ✔");
+});
 
+// Main route
+app.get("/api/download", async (req, res) => {
   try {
-    const response = await axios.post(
-      "https://fusiontik.vercel.app/api/tiktok",
-      { url: tiktokUrl },
+    const target = req.query.url;
+    if (!target) return res.json({ error: "Missing ?url=" });
+
+    const form = new FormData();
+    form.append("url", target);
+
+    // xrespond
+    const xResp = await axios.post(
+      "https://tools.xrespond.com/api/social/all/downloader",
+      form,
       {
         headers: {
-          "Content-Type": "application/json",
-          "Origin": "https://fusiontik.vercel.app",
-          "Referer": "https://fusiontik.vercel.app/",
-          "User-Agent":
-            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
-        },
+          ...form.getHeaders(),
+          origin: "https://downsocial.io",
+          referer: "https://downsocial.io/",
+          "user-agent":
+            "Mozilla/5.0 (X11; Linux x86_64) Chrome/117 Safari/537.36"
+        }
       }
     );
-    res.json(response.data);
+
+    // FIX the double slash JSON-escaped URLs
+    let videoUrl =
+      xResp.data?.data?.video?.no_wm ||
+      xResp.data?.data?.media || 
+      null;
+
+    if (!videoUrl) return res.json({ error: "No video found." });
+
+    videoUrl = videoUrl.replace(/^\/\//, "https://");
+
+    // Download and save
+    const videoId = Date.now() + ".mp4";
+    const filePath = path.join(VIDEO_DIR, videoId);
+
+    const videoStream = await axios.get(videoUrl, { responseType: "stream" });
+    const writer = fs.createWriteStream(filePath);
+    videoStream.data.pipe(writer);
+
+    await new Promise((resolve) => writer.on("finish", resolve));
+
+    // Your hosted file
+    const hostedUrl = `${req.protocol}://${req.get("host")}/videos/${videoId}`;
+
+    res.json({
+      success: true,
+      hosted: hostedUrl,
+      original: videoUrl
+    });
+
   } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch TikTok video", details: err.response?.data || err.message });
+    res.json({
+      success: false,
+      error: err.message,
+      details: err.response?.data
+    });
   }
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Serve videos
+app.use("/videos", express.static(VIDEO_DIR));
+
+app.listen(PORT, () => console.log("Server running on port " + PORT));
